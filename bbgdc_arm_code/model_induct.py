@@ -49,10 +49,9 @@ class GraphConvolution(nn.Module):
 
 
 class BBGDC(nn.Module):
-    def __init__(self, num_pars,num_edges,alpha=0.8, a_uc_init=-1.0, thres=1e-3, kl_scale=1.0):
+    def __init__(self, num_pars, alpha=0.8, a_uc_init=-1.0, thres=1e-3, kl_scale=1.0):
         super(BBGDC, self).__init__()
         self.num_pars = num_pars
-        self.num_samps = num_edges
         self.alpha = alpha
         self.thres = thres
         self.kl_scale = kl_scale
@@ -62,8 +61,6 @@ class BBGDC(nn.Module):
         self.a_uc.data.uniform_(1.0, 1.5)
         self.b_uc.data.uniform_(0.49, 0.51)
         
-        self.u_samp = Uniform(0.0,1.0).rsample(torch.Size([self.num_samps,self.num_pars])).cuda()
-        self.mask_samp = Uniform(0.0,1.0).rsample(torch.Size([self.num_samps,self.num_pars])).cuda()
         self.u = torch.rand(self.num_pars).clamp(1e-6, 1-1e-6).cuda()
     
     def get_params(self):
@@ -96,11 +93,11 @@ class BBGDC(nn.Module):
     def get_u(self):
         return self.u
     
-    def get_weight(self, training, pi):
+    def get_weight(self, training, num_samps, pi):
         if training:
             # pi = self.sample_pi()
             p_z=Uniform(0.0,1.0)
-            self.u_samp = p_z.rsample(torch.Size([self.num_samps,self.num_pars])).cuda()
+            self.u_samp = p_z.rsample(torch.Size([num_samps,self.num_pars])).cuda()
             mask_11 = (-self.u_samp > -pi).float()
             mask_12 = (self.u_samp > 1.-pi).float()
             
@@ -108,7 +105,7 @@ class BBGDC(nn.Module):
 
         else:
             p_z=Uniform(0.0,1.0)
-            self.u_samp = p_z.rsample(torch.Size([self.num_samps,self.num_pars])).cuda()
+            self.u_samp = p_z.rsample(torch.Size([num_samps,self.num_pars])).cuda()
             mask_11 = (-self.u_samp > -pi).float()
             mask_12 = (self.u_samp > 1.-pi).float()
         
@@ -169,28 +166,23 @@ class BBGDC(nn.Module):
 
 
 class BBGDCGCN(nn.Module):
-    def __init__(self, nfeat_list, dropout, nblock, adj, nlay, num_edges,num_nodes,sym):
+    def __init__(self, nfeat_list, dropout, nblock, adj, nlay, sym):
         super(BBGDCGCN, self).__init__()      
         assert len(nfeat_list)==nlay+1
         self.nlay = nlay
         self.sym=sym
         self.nblock = nblock
-        self.num_edges = num_edges
-        self.num_nodes = num_nodes
         self.drpedg_list = []
         self.dropout = dropout
         gcs_list = []
-        self.temperature = nn.Parameter(torch.ones(1, requires_grad=True))
-        self.temperature.requires_grad = True
-
         idx = 0
         for i in range(nlay):
             if i==0:
-                self.drpedg_list.append(BBGDC(1,self.nblock*self.num_edges))
+                self.drpedg_list.append(BBGDC(1))
                 gcs_list.append([str(idx), GraphConvolution(nfeat_list[i], nfeat_list[i+1])])
                 idx += 1
             else:
-                self.drpedg_list.append(BBGDC(1,self.nblock*self.num_edges))
+                self.drpedg_list.append(BBGDC(1))
                 for j in range(self.nblock):
                     gcs_list.append([str(idx), GraphConvolution(int(nfeat_list[i]/self.nblock)
                                                                 , nfeat_list[i+1])])
@@ -200,7 +192,7 @@ class BBGDCGCN(nn.Module):
         self.gcs = nn.ModuleDict(gcs_list)
         self.nfeat_list = nfeat_list
     
-    def forward(self, x, labels, adj, nz_idx, obs_idx, warm_up, adj_normt, training=True
+    def forward(self, x, labels, adj, nz_idx, num_edges, num_nodes, obs_idx, warm_up, adj_normt, training=True
                 , mul_type='norm_sec', con_type='res_sum', samp_type='rel_ber', fixed_rates=[]):
         h_perv1 = x
         h_perv2 = x
@@ -214,19 +206,21 @@ class BBGDCGCN(nn.Module):
                 pi = self.drpedgs[i].sample_pi() # layer 별로 sampling 
             else:
                 pi = fixed_rates[i]
-            mask_vec1,mask_vec2 = self.drpedgs[i].get_weight(training, pi)
+            
+
+            mask_vec1,mask_vec2 = self.drpedgs[i].get_weight(training, num_edges, pi)
             drop_rates.append(pi)
             mask_vec1=torch.squeeze(mask_vec1)
             mask_vec2=torch.squeeze(mask_vec2)
             if i==0:
                 
                 if self.sym:
-                    mask_mat1 = torch.zeros((self.num_nodes, self.num_nodes)).cuda()
-                    mask_mat1[nz_idx[0], nz_idx[1]] = mask_vec1[:self.num_edges]
+                    mask_mat1 = torch.zeros((num_nodes, num_nodes)).cuda()
+                    mask_mat1[nz_idx[0], nz_idx[1]] = mask_vec1[:num_edges]
                     mask_mat1 = (mask_mat1 + mask_mat1.T) / 2.    
                 else:
-                    mask_mat1 = torch.zeros((self.num_nodes, self.num_nodes)).cuda()
-                    mask_mat1[nz_idx[0], nz_idx[1]] = mask_vec1[:self.num_edges]
+                    mask_mat1 = torch.zeros((num_nodes, num_nodes)).cuda()
+                    mask_mat1[nz_idx[0], nz_idx[1]] = mask_vec1[:num_edges]
                                 
                 if mul_type=='norm_sec':
                     adj_lay1 = normalize_torch(torch.mul(mask_mat1, adj) + torch.eye(adj.shape[0]).cuda())
@@ -234,12 +228,12 @@ class BBGDCGCN(nn.Module):
                     adj_lay1 = torch.mul(mask_mat1, adj_normt).cuda()
                     
                 if self.sym:
-                    mask_mat2 = torch.zeros((self.num_nodes, self.num_nodes)).cuda()
-                    mask_mat2[nz_idx[0], nz_idx[1]] = mask_vec2[:self.num_edges]
+                    mask_mat2 = torch.zeros((num_nodes, num_nodes)).cuda()
+                    mask_mat2[nz_idx[0], nz_idx[1]] = mask_vec2[:num_edges]
                     mask_mat2 = (mask_mat2 + mask_mat2.T) / 2.    
                 else:
-                    mask_mat2 = torch.zeros((self.num_nodes, self.num_nodes)).cuda()
-                    mask_mat2[nz_idx[0], nz_idx[1]] = mask_vec2[:self.num_edges]
+                    mask_mat2 = torch.zeros((num_nodes, num_nodes)).cuda()
+                    mask_mat2[nz_idx[0], nz_idx[1]] = mask_vec2[:num_edges]
                                 
                 if mul_type=='norm_sec':
                     adj_lay2 = normalize_torch(torch.mul(mask_mat2, adj) + torch.eye(adj.shape[0]).cuda())
@@ -257,12 +251,12 @@ class BBGDCGCN(nn.Module):
                 for j in range(self.nblock):
          
                     if self.sym:
-                        mask_mat1 = torch.zeros((self.num_nodes, self.num_nodes)).cuda()
-                        mask_mat1[nz_idx[0], nz_idx[1]] = mask_vec1[j*self.num_edges:(j+1)*self.num_edges]
+                        mask_mat1 = torch.zeros((num_nodes, num_nodes)).cuda()
+                        mask_mat1[nz_idx[0], nz_idx[1]] = mask_vec1[j*num_edges:(j+1)*num_edges]
                         mask_mat1 = (mask_mat1 + mask_mat1.T) / 2.    
                     else:
-                        mask_mat1 = torch.zeros((self.num_nodes, self.num_nodes)).cuda()
-                        mask_mat1[nz_idx[0], nz_idx[1]] = mask_vec1[j*self.num_edges:(j+1)*self.num_edges]
+                        mask_mat1 = torch.zeros((num_nodes, num_nodes)).cuda()
+                        mask_mat1[nz_idx[0], nz_idx[1]] = mask_vec1[j*num_edges:(j+1)*num_edges]
                     
                     if mul_type=='norm_sec':
                         adj_lay1 = normalize_torch(torch.mul(mask_mat1, adj) + torch.eye(adj.shape[0]).cuda())
@@ -270,12 +264,12 @@ class BBGDCGCN(nn.Module):
                         adj_lay1 = torch.mul(mask_mat1, adj_normt).cuda()
                         
                     if self.sym:
-                        mask_mat2 = torch.zeros((self.num_nodes, self.num_nodes)).cuda()
-                        mask_mat2[nz_idx[0], nz_idx[1]] = mask_vec2[j*self.num_edges:(j+1)*self.num_edges]
+                        mask_mat2 = torch.zeros((num_nodes, num_nodes)).cuda()
+                        mask_mat2[nz_idx[0], nz_idx[1]] = mask_vec2[j*num_edges:(j+1)*num_edges]
                         mask_mat2 = (mask_mat2 + mask_mat2.T) / 2.    
                     else:
-                        mask_mat2 = torch.zeros((self.num_nodes, self.num_nodes)).cuda()
-                        mask_mat2[nz_idx[0], nz_idx[1]] = mask_vec2[j*self.num_edges:(j+1)*self.num_edges]
+                        mask_mat2 = torch.zeros((num_nodes, num_nodes)).cuda()
+                        mask_mat2[nz_idx[0], nz_idx[1]] = mask_vec2[j*num_edges:(j+1)*num_edges]
                     
                     if mul_type=='norm_sec':
                         adj_lay2 = normalize_torch(torch.mul(mask_mat2, adj) + torch.eye(adj.shape[0]).cuda())

@@ -15,16 +15,6 @@ import torch
 import math
 
 
-# torch.cuda.device_count()
-
-
-# seed = 5
-# np.random.seed(seed)
-# torch.manual_seed(seed)
-# if torch.cuda.is_available():
-#     torch.cuda.manual_seed(seed)
-
-
 
 # util functions
 
@@ -46,6 +36,8 @@ def encode_onehot(labels):
     return labels_onehot
 
 def load_data(dataset_str):
+
+
     names = ['x', 'y', 'tx', 'ty', 'allx', 'ally', 'graph']
     objects = []
     for i in range(len(names)):
@@ -114,6 +106,12 @@ def accuracy(output, labels):
     correct = preds.eq(labels).double()
     correct = correct.sum()
     return correct / len(labels)
+
+def accuracy_np(output, labels, inds):
+    pred = np.argmax(output, axis=1).astype(np.int32)
+    correct = np.equal(labels[inds], pred[inds]).astype(np.float32)
+    correct = correct.sum()
+    return correct / len(inds)
 
 def accuracy_mrun(outputs, labels, inds):
     preds = outputs.max(2)[1].mode(0)[0].type_as(labels)
